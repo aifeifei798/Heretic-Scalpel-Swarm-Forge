@@ -12,8 +12,19 @@ frontend/                  pnpm + React + Vite
 ## 快速开始
 
 ```bash
-./dev.sh                       # 后端 :8848 + 前端 :5173
+./dev.sh          # 启动（后端 :8848 + 前端 :5173）
+./dev.sh stop     # 停止
+./dev.sh status   # 查看状态
+./dev.sh restart  # 重启
 ```
+
+每个服务用 `setsid` 单独开进程组并记录 PID，所以即使它是 detached
+启动的（`setsid nohup ./dev.sh &`），之后在任意 shell 里
+`./dev.sh stop` 都能干净收掉整棵进程树 —— 包括 uvicorn `--reload`
+fork 出的 worker 和 vite fork 出的 esbuild。
+
+如果端口被 PID 文件之外的进程占着，`stop` 会按**工作目录**判断归属，
+只回收 cwd 在本项目内的孤儿，不会误杀别的项目占着同端口的服务。
 
 单独跑 CLI：
 
