@@ -105,6 +105,7 @@ def build_bundle(cfg: ForgeConfig, checkpoint: str | Path,
         "macro_dense_scale": float(cfg.arch.macro_dense_scale),
         "hidden_dim": int(meta["hidden_dim"]),
         "macro_names": list(arch.get("macro_names", [])),
+        "domain_to_macro": dict(arch.get("domain_to_macro", {})),
         "text_only": bool(getattr(cfg, "text_only", True)),
         "auto_map": {
             "AutoConfig": "configuration_scalpel.ScalpelUniversalConfig",

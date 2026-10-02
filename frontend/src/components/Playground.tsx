@@ -9,6 +9,8 @@ interface Msg {
 }
 
 interface Checkpoint {
+  kind: "checkpoint" | "bundle";
+  label: string;
   path: string;
   mb: number;
 }
@@ -52,8 +54,8 @@ export function Playground({ busy }: { busy: boolean }) {
     api
       .playground()
       .then((r) => {
-        setCks(r.checkpoints);
-        if (r.checkpoints.length) setCk(r.checkpoints[0].path);
+        setCks(r.artifacts);
+        if (r.artifacts.length) setCk(r.artifacts[0].path);
       })
       .catch((e) => setErr((e as Error).message));
   }, []);
@@ -108,12 +110,20 @@ export function Playground({ busy }: { busy: boolean }) {
           <label>
             检查点
             <select className="input" value={ck} onChange={(e) => setCk(e.target.value)}>
-              {cks.length === 0 && <option value="">（没有可用检查点）</option>}
-              {cks.map((c) => (
-                <option key={c.path} value={c.path}>
-                  {c.path} · {c.mb} MB
-                </option>
-              ))}
+              {cks.length === 0 && <option value="">（没有可用产物）</option>}
+              {["checkpoint", "bundle"].map((group) => {
+                const items = cks.filter((c) => c.kind === group);
+                if (!items.length) return null;
+                return (
+                  <optgroup key={group} label={group === "bundle" ? "打包好的 HF 模型" : "原始训练权重"}>
+                    {items.map((c) => (
+                      <option key={c.path} value={c.path}>
+                        {c.label} · {c.mb} MB
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </label>
           <label>

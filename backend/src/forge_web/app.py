@@ -324,13 +324,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def playground_info() -> dict[str, Any]:
         """列出可用于试跑的检查点。"""
         cands: list[dict[str, Any]] = []
+        # 原始训练权重：.pt 文件
         for p in sorted(st.project_root.glob("outputs/*.pt")):
-            cands.append({"path": str(p.relative_to(st.project_root)),
+            cands.append({"kind": "checkpoint", "label": p.name,
+                          "path": str(p.relative_to(st.project_root)),
                           "mb": round(p.stat().st_size / 1024 ** 2, 1)})
         for p in sorted((st.project_root / "data" / "runs").glob("ckpt-*.pt")):
-            cands.append({"path": str(p.relative_to(st.project_root)),
+            cands.append({"kind": "checkpoint", "label": p.name,
+                          "path": str(p.relative_to(st.project_root)),
                           "mb": round(p.stat().st_size / 1024 ** 2, 1)})
-        return {"checkpoints": cands}
+        # 打包好的 HF 模型：含 config.json + swarm_weights.pt 的目录
+        roots = [st.project_root / "outputs",
+                 st.project_root / "data" / "runs"]
+        for root in roots:
+            if not root.exists():
+                continue
+            for d in sorted(root.iterdir()):
+                if (d.is_dir() and (d / "config.json").exists()
+                        and (d / "swarm_weights.pt").exists()):
+                    total = sum(f.stat().st_size for f in d.rglob("*")
+                                if f.is_file())
+                    cands.append({
+                        "kind": "bundle", "label": d.name + "/",
+                        "path": str(d.relative_to(st.project_root)),
+                        "mb": round(total / 1024 ** 2, 1)})
+        return {"artifacts": cands}
 
     @app.post("/api/chat")
     def chat(req: dict[str, Any] = Body(...)) -> dict[str, Any]:

@@ -26,6 +26,30 @@ from typing import Any, Iterator, Sequence
 import torch
 
 
+# ---------------------------------------------------------------------------
+# 构造辅助
+# ---------------------------------------------------------------------------
+def _arch_from_conf(conf: dict) -> "ArchProfile":
+    """从 bundle 的 config.json 还原 ArchProfile。
+
+    发布包里的字段可能没有 ``domain_to_macro``——它不是推理期必须的，
+    推理时路由已经在 wrapper 里硬编码。缺了就用默认均衡映射。
+    """
+    from .schema import ArchProfile
+
+    kw: dict = dict(
+        num_macro_cores=conf["num_macro_cores"],
+        macro_names=conf.get("macro_names")
+        or [f"M{i}" for i in range(conf["num_macro_cores"])],
+        num_micro_experts=conf["num_micro_experts"],
+        macro_rank=conf.get("macro_rank", 64),
+        micro_rank=conf.get("micro_rank", 16),
+    )
+    if conf.get("domain_to_macro"):
+        kw["domain_to_macro"] = conf["domain_to_macro"]
+    return ArchProfile(**kw)
+
+
 @dataclass
 class GenStats:
     prompt_tokens: int = 0
@@ -64,6 +88,71 @@ class SwarmChat:
         self = cls(ctx.model, ctx.wrappers, tok, cfg)
         self.loaded = n
         self.meta = meta
+        return self
+
+    @classmethod
+    def from_bundle(cls, bundle_dir: str | Path, *,
+                    device: str | None = None) -> "SwarmChat":
+        """从**发布包目录**装载 —— 走的正是用户 ship 的同一条加载路径。
+
+        与 :meth:`from_checkpoint` 的关键区别：
+        后者直接拿训练期的原始 checkpoint，绕过发布包的装配代码；
+        前者走 ``AutoModelForCausalLM.from_pretrained(trust_remote_code=True)``
+        ——发布包里的 ``ScalpelUniversalForCausalLM``。
+
+        所以试跑打包模型时，用户测的 就是 ship 的东西。
+        如果发布包的导出路径出 bug（比如代码切片、软截断漏掉），
+        ``from_checkpoint`` 永远发现不了，只有 ``from_bundle`` 能暴露。
+        """
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        bundle_dir = Path(bundle_dir)
+        if not bundle_dir.is_dir():
+            raise ValueError(f"不是发布包目录：{bundle_dir}")
+
+        # 用 ScalpelUniversalConfig 读回元信息，拼一个最小可用的 ForgeConfig
+        import json as _json
+
+        conf = _json.loads((bundle_dir / "config.json").read_text("utf-8"))
+
+        from .schema import ArchProfile, ForgeConfig, TrainConfig
+
+        cfg = ForgeConfig(
+            project_name=conf.get("name", "from-bundle"),
+            base_model_id=conf["base_model_name_or_path"],
+            data_path="",
+            arch=_arch_from_conf(conf),
+            train=TrainConfig(micro_top_k=conf.get("micro_top_k", 2)),
+        )
+
+        tok = AutoTokenizer.from_pretrained(
+            conf["base_model_name_or_path"],
+            trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            str(bundle_dir), trust_remote_code=True,
+            device_map=device or "auto",
+            dtype=torch.bfloat16)
+
+        # 这些与训练期的 wrapper 是同一个类型，方法完全一致：
+        # set_scales / last_macro_logits / last_micro_topk 都可用
+        wrappers = list(getattr(model, "wrappers", []) or [])
+        if not wrappers:
+            # 发布包在某些加载顺序下可能没挂 wrappers，兜底定位
+            from .modeling import locate_layers
+            inner = getattr(model, "model", None)
+            if inner is not None:
+                layers = locate_layers(inner)
+                wrappers = [layer.mlp for layer in layers
+                            if hasattr(layer.mlp, "last_macro_logits")]
+
+        self = cls(model, wrappers, tok, cfg)
+        self.loaded = sum(
+            len(w.macro_cores) + len(w.micro_pool) + 2 for w in wrappers)
+        self.meta = {
+            "hidden_dim": conf.get("hidden_dim"),
+            "step": None,
+            "source": "bundle:" + bundle_dir.name,
+        }
         return self
 
     # -- 热调 ---------------------------------------------------------

@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,12 +36,22 @@ def main(argv: list[str] | None = None) -> int:
     from forge_core.infer import SwarmChat
     from forge_core.schema import ForgeConfig
 
-    cfg = ForgeConfig.load(args.config)
-    cfg.train.device = args.device
-    if args.top_k:
-        cfg.train.micro_top_k = args.top_k
+    artifact = Path(args.checkpoint)
+    is_bundle = artifact.is_dir() and (artifact / "config.json").exists()
 
-    chat = SwarmChat.from_checkpoint(cfg, args.checkpoint, device=args.device)
+    if is_bundle:
+        # 打包好的 HF 模型：走 from_pretrained，测的就是 ship 的路径
+        chat = SwarmChat.from_bundle(artifact, device=args.device)
+        cfg = chat.cfg
+        if args.top_k:
+            cfg.train.micro_top_k = args.top_k
+            chat.set_scales(micro_top_k=args.top_k)
+    else:
+        cfg = ForgeConfig.load(args.config)
+        cfg.train.device = args.device
+        if args.top_k:
+            cfg.train.micro_top_k = args.top_k
+        chat = SwarmChat.from_checkpoint(cfg, artifact, device=args.device)
 
     msgs = []
     if args.system:

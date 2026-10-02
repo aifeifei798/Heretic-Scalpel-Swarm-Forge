@@ -58,11 +58,18 @@ def cmd_chat(args: Any) -> int:
     if args.top_k:
         cfg.train.micro_top_k = args.top_k
 
-    chat = SwarmChat.from_checkpoint(cfg, args.checkpoint,
-                                     device=args.device or None)
-    print(f"底座   {cfg.base_model_id}")
-    print(f"架构   M={cfg.arch.num_macro_cores}  N={cfg.arch.num_micro_experts}"
-          f"  top-k={cfg.train.micro_top_k}")
+    ckpt_arg = Path(args.checkpoint)
+    if ckpt_arg.is_dir() and (ckpt_arg / "config.json").exists():
+        chat = SwarmChat.from_bundle(ckpt_arg, device=args.device or None)
+    else:
+        chat = SwarmChat.from_checkpoint(cfg, args.checkpoint,
+                                         device=args.device or None)
+    if args.top_k:
+        cfg.train.micro_top_k = args.top_k
+        chat.set_scales(micro_top_k=args.top_k)
+    print(f"底座   {chat.cfg.base_model_id}")
+    print(f"架构   M={chat.cfg.arch.num_macro_cores}  N={chat.cfg.arch.num_micro_experts}"
+          f"  top-k={chat.cfg.train.micro_top_k}")
     print(f"权重   {args.checkpoint}  已加载 {chat.loaded} 个张量"
           f"（step {chat.meta.get('step')}）")
     if args.micro_scale is not None or args.macro_scale is not None:
@@ -78,7 +85,7 @@ def cmd_chat(args: Any) -> int:
     else:
         gen_kw["seed"] = args.seed
 
-    names = list(cfg.arch.macro_names)
+    names = list(chat.cfg.arch.macro_names)
 
     # -- 对照模式 -----------------------------------------------------
     if args.compare:
@@ -182,7 +189,7 @@ def register(sub) -> None:
     p.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     p.add_argument("--data", default=None)
     p.add_argument("--checkpoint", default=_default_checkpoint(),
-                   help="swarm 权重（save_checkpoint 的产物）")
+                   help="swarm 权重 (.pt) 或打包好的模型目录（含 config.json）")
     p.add_argument("--device", default=None, help="auto / cuda:0 / cpu")
     p.add_argument("--prompt", default=None, help="一次性提问；不给则进交互模式")
     p.add_argument("--system", default=None, help="system prompt 文件路径")

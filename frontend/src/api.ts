@@ -142,7 +142,7 @@ export const api = {
   logUrl: (runId: number) => `${BASE}/api/runs/${runId}/log`,
 
   playground: () =>
-    req<{ checkpoints: { path: string; mb: number }[] }>("/api/playground"),
+    req<{ artifacts: { kind: "checkpoint" | "bundle"; label: string; path: string; mb: number }[] }>("/api/playground"),
   chat: (body: {
     checkpoint: string; prompt: string; history?: { role: string; content: string }[];
     max_new_tokens: number; temperature: number; compare: boolean; top_k?: number;
