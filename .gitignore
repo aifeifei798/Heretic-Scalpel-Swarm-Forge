@@ -8,3 +8,6 @@ outputs/
 *.pt
 train_history.json
 *.tsbuildinfo
+.run/
+logs/
+*.tsbuildinfo
