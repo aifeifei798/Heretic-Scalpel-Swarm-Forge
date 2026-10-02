@@ -317,10 +317,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 p = Path(r.log_path)
         return FileResponse(str(p), media_type="text/plain")
 
+    # -----------------------------------------------------------------
+    # 推理 / 对话
+    # -----------------------------------------------------------------
+    @app.get("/api/playground")
+    def playground_info() -> dict[str, Any]:
+        """列出可用于试跑的检查点。"""
+        cands: list[dict[str, Any]] = []
+        for p in sorted(st.project_root.glob("outputs/*.pt")):
+            cands.append({"path": str(p.relative_to(st.project_root)),
+                          "mb": round(p.stat().st_size / 1024 ** 2, 1)})
+        for p in sorted((st.project_root / "data" / "runs").glob("ckpt-*.pt")):
+            cands.append({"path": str(p.relative_to(st.project_root)),
+                          "mb": round(p.stat().st_size / 1024 ** 2, 1)})
+        return {"checkpoints": cands}
+
+    @app.post("/api/chat")
+    def chat(req: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """同步生成。适合几百 token 的短回答。
+
+        为什么同步而不是 SSE 流式：加载底座要 20~40 秒，
+        真做成流式还得先解决"模型还没加载完就断开重连"的问题，
+        对一个验证用的 Playground 来说复杂度不划算。
+        要长文本请调大 ``max_new_tokens`` 并接受等待。
+        """
+        from .jobs import SwarmChatSpec
+
+        spec = SwarmChatSpec(**req)
+        ckpt = resolve(spec.checkpoint)
+        if not ckpt.exists():
+            raise HTTPException(400, f"检查点不存在：{ckpt}")
+
+        # 模型很占显存，且只有一块 GPU：与训练互斥
+        if sup.active():
+            raise HTTPException(
+                409, "有训练正在跑，显存不够同时加载模型。先停掉训练。")
+
+        try:
+            return run_chat(spec, ckpt, st)
+        except Exception as e:                       # noqa: BLE001
+            raise HTTPException(500, f"{type(e).__name__}: {e}") from e
+
     app.state.settings = st
     app.state.supervisor = sup
     app.state.db_path = db_path
     return app
+
+
+def run_chat(spec: Any, ckpt: Path, st: Settings) -> dict[str, Any]:
+    """在**独立子进程**里跑一次生成。
+
+    又是一次进程隔离：加载底座会占十几 GB 显存，
+    常驻在 API 进程里等于把网站和训练一起拖死，
+    而且模型卸不干净（CUDA context 一旦建立就留着）。
+    """
+    from .chatproc import ChatWorker
+
+    return ChatWorker(st).run(spec, ckpt)
 
 
 def _persist_events(sup: Supervisor, db_path: Path, run_id: int) -> None:

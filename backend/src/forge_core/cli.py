@@ -309,6 +309,9 @@ def build_parser() -> argparse.ArgumentParser:
     sm = sub.add_parser("smoke", help="CPU 最小规模自检（不需要 GPU）")
     sm.set_defaults(func=cmd_smoke)
 
+    from .chat import register as register_chat
+    register_chat(sub)
+
     ex = sub.add_parser("export", help="把 checkpoint 打成发布包")
     ex.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ex.add_argument("--data", default=None)

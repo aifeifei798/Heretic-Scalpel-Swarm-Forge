@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -198,6 +199,162 @@ def test_routing_targets_reject_bad_macro_map() -> None:
         assert "超出" in str(e), e
     else:
         raise AssertionError("越界的 macro 映射竟然被接受了")
+
+
+def _tiny_wrappers(n_layers=2, num_macro=4, num_micro=6,
+                   macro_rank=4, micro_rank=2):
+    """造一组与真实装配同构的 wrapper（LoRA + router）。"""
+    import torch.nn as nn
+
+    from .modeling import SwarmWrapper
+
+    base = nn.Linear(16, 16, bias=False)
+    w = SwarmWrapper(base, hidden_dim=16, num_macro=num_macro,
+                     macro_rank=macro_rank, num_micro=num_micro,
+                     micro_rank=micro_rank, micro_top_k=2,
+                     param_dtype=torch.float32, device="cpu")
+    return [w] * n_layers if n_layers == 1 else [
+        SwarmWrapper(nn.Linear(16, 16, bias=False), hidden_dim=16,
+                     num_macro=num_macro, macro_rank=macro_rank,
+                     num_micro=num_micro, micro_rank=micro_rank,
+                     micro_top_k=2, param_dtype=torch.float32, device="cpu")
+        for _ in range(n_layers)]
+
+
+def _ckpt_from(wrappers, step=7, macro_rank=4, micro_rank=2,
+               num_macro=4, num_micro=6):
+    sd = {"__meta__": {"step": step, "format": "forge-swarm-v2",
+                       "base_model_id": "dummy/base", "hidden_dim": 16,
+                       "arch": {"num_macro_cores": num_macro,
+                                "num_micro_experts": num_micro,
+                                "macro_rank": macro_rank,
+                                "micro_rank": micro_rank}}}
+    for i, w in enumerate(wrappers):
+        for j, core in enumerate(w.macro_cores):
+            sd[f"layer{i}.macro{j}"] = core.state_dict()
+        for j, e in enumerate(w.micro_pool):
+            sd[f"layer{i}.micro{j}"] = e.state_dict()
+        sd[f"layer{i}.router_macro"] = w.router_macro.state_dict()
+        sd[f"layer{i}.router_micro"] = w.router_micro.state_dict()
+    return sd
+
+
+def test_load_swarm_weights_roundtrip() -> None:
+    """save → load 往返：参数必须逐位相同。"""
+    import tempfile
+
+    from .train import load_swarm_weights
+
+    torch.manual_seed(0)
+    src = _tiny_wrappers()
+    for w in src:                                   # 打破零初始化
+        for p in w.parameters():
+            with torch.no_grad():
+                p.add_(torch.randn_like(p) * 0.05)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "ckpt.pt"
+        torch.save(_ckpt_from(src), path)
+        dst = _tiny_wrappers()
+        n, meta = load_swarm_weights(path, dst)
+
+    assert meta["step"] == 7
+    # 每个 wrapper：(M-1) 个大核 + N 个小核 + 2 个 router
+    per_layer = (src[0].num_macro - 1) + src[0].num_micro + 2
+    assert n == per_layer * len(src), (n, per_layer * len(src))
+
+    # 只比对**可训练**部分。base_core 是只读底座，故意不在 checkpoint 里
+    # ——把它也算进去就等于要求 checkpoint 存一份 10GB 的底座。
+    def trainable(w):
+        ps = [p for m in w.macro_cores for p in m.parameters()]
+        ps += [p for m in w.micro_pool for p in m.parameters()]
+        ps += list(w.router_macro.parameters())
+        ps += list(w.router_micro.parameters())
+        return ps
+
+    for a, b in zip(src, dst):
+        for pa, pb in zip(trainable(a), trainable(b)):
+            assert torch.equal(pa, pb), "往返后参数不一致"
+
+
+def test_load_swarm_weights_rejects_rank_mismatch() -> None:
+    """改了 rank 之后复用旧 checkpoint，必须**加载时**就报错。
+
+    ``load_state_dict`` 自己不会比对形状——它只关心键。
+    形状不符要到第一次前向才炸出一句 ``mat1 and mat2 shapes cannot be
+    multiplied``，那时已经跑了半程训练，排查成本高得多。
+    """
+    import tempfile
+
+    from .train import load_swarm_weights
+
+    src = _tiny_wrappers(macro_rank=4)
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "ckpt.pt"
+        torch.save(_ckpt_from(src, macro_rank=4), path)
+        # 现在用更大的 rank 去装配
+        dst = _tiny_wrappers(macro_rank=8)
+        try:
+            load_swarm_weights(path, dst)
+        except ValueError as e:
+            assert "形状不符" in str(e), e
+        else:
+            raise AssertionError("rank 不符竟然被静默接受了")
+
+
+def test_load_swarm_weights_rejects_arch_mismatch() -> None:
+    """专家数对不上必须在加载时报错，而不是前向时才炸。"""
+    import tempfile
+
+    from .train import load_swarm_weights
+
+    src = _tiny_wrappers(num_micro=6)
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "ckpt.pt"
+        torch.save(_ckpt_from(src, num_micro=6), path)
+        dst = _tiny_wrappers(num_micro=8)
+        try:
+            load_swarm_weights(path, dst)
+        except ValueError as e:
+            assert "num_micro_experts" in str(e) or "N=" in str(e), e
+        else:
+            raise AssertionError("专家数不符竟然被静默接受了")
+
+
+def test_load_swarm_weights_rejects_legacy_format() -> None:
+    """旧版 scalpel_forge.py 的检查点必须明确拒绝。"""
+    import tempfile
+
+    from .train import load_swarm_weights
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "legacy.pt"
+        torch.save({"__meta__": {"format": "scalpel-v1"}}, path)
+        try:
+            load_swarm_weights(path, _tiny_wrappers())
+        except ValueError as e:
+            assert "格式" in str(e), e
+        else:
+            raise AssertionError("旧格式竟然被接受了")
+
+
+def test_load_swarm_weights_rejects_layer_count_mismatch() -> None:
+    """层数对不上时，多余/缺失的键必须报出来。"""
+    import tempfile
+
+    from .train import load_swarm_weights
+
+    src = _tiny_wrappers(n_layers=3)
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "ckpt.pt"
+        torch.save(_ckpt_from(src), path)
+        dst = _tiny_wrappers(n_layers=2)
+        try:
+            load_swarm_weights(path, dst)
+        except ValueError as e:
+            assert "缺少" in str(e) or "无法归属" in str(e), e
+        else:
+            raise AssertionError("层数不符竟然被静默接受了")
 
 
 def test_lr_schedule_warmup_cosine() -> None:

@@ -195,3 +195,21 @@ fieldset:disabled { opacity: .55; }
 
 .runs { margin-top: 22px; }
 .runs h3 { font-size: 14px; margin-bottom: 10px; }
+
+/* --- Playground --- */
+.pg { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .pg { grid-template-columns: 1fr; } }
+.pg__side { display: grid; gap: 16px; }
+.pg__main { min-width: 0; }
+.chatlog { min-height: 300px; max-height: 520px; overflow: auto; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.chatlog__empty { color: var(--muted); text-align: center; padding: 30px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.msg { display: grid; grid-template-columns: 48px 1fr; gap: 8px; }
+.msg__who { color: var(--muted); font-size: 12px; padding-top: 4px; text-align: right; }
+.msg__body { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.msg--user .msg__body { background: #1d2740; border-color: #2e3d63; }
+.cmp { margin: 10px 0; }
+.cmp summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.cmp pre { background: #0d131c; border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-top: 6px; max-height: 200px; overflow: auto; white-space: pre-wrap; }
+.pg__input { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.pg__input textarea { resize: vertical; }
+.pg__btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }

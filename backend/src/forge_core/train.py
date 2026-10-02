@@ -617,6 +617,82 @@ def load_checkpoint(path: str | Path, device: str = "cpu") -> dict[str, Any]:
     return torch.load(path, map_location=device, weights_only=False)
 
 
+def load_swarm_weights(path: str | Path,
+                       wrappers: list[SwarmWrapper]) -> tuple[int, dict[str, Any]]:
+    """把检查点灌进**已装配好**的 wrappers，返回 (加载张量数, meta)。
+
+    为什么必须有形状校验
+    ------------------
+    ``load_state_dict`` 默认只检查"键是否存在"，``strict=True`` 时会
+    抱怨缺键/多键，但**不会**告诉你某个 LoRA 的形状对不上——
+    那种情况会在第一次前向时才炸出一句难以定位的 mat1/mat2 错误。
+
+    而形状对不上的现实场景并不罕见：换了 ``macro_rank`` /
+    ``micro_rank`` / 专家数之后拿旧 checkpoint 继续跑，
+    或者加载了别人发布的包。这里逐个显式比对，
+    在**加载时**就报清楚"哪个键、期望什么、实际什么"。
+    """
+    sd = load_checkpoint(path)
+    meta = sd.get("__meta__", {})
+    fmt = meta.get("format", "")
+    if not str(fmt).startswith("forge-swarm-"):
+        raise ValueError(
+            f"权重格式不认得：{fmt!r}（期望 'forge-swarm-v2'）。"
+            "旧版 scalpel_forge.py 的检查点无法复用。")
+
+    arch = meta.get("arch") or {}
+    n_layers = len(wrappers)
+    if arch and int(arch.get("num_macro_cores", 0)) != \
+            wrappers[0].num_macro:
+        raise ValueError(
+            f"检查点 M={arch.get('num_macro_cores')} 与当前装配的 "
+            f"M={wrappers[0].num_macro} 不符")
+    if arch and int(arch.get("num_micro_experts", 0)) != \
+            wrappers[0].num_micro:
+        raise ValueError(
+            f"检查点 N={arch.get('num_micro_experts')} 与当前装配的 "
+            f"N={wrappers[0].num_micro} 不符")
+
+    loaded = 0
+
+    def put(target: nn.Module, key: str) -> None:
+        nonlocal loaded
+        if key not in sd:
+            raise KeyError(f"检查点缺少 {key!r}")
+        ref = target.state_dict()
+        got = sd[key]
+        if set(ref) != set(got):
+            raise ValueError(
+                f"{key} 的键不匹配：期望 {sorted(ref)}，实际 {sorted(got)}")
+        for k, v in ref.items():
+            g = got[k]
+            if tuple(g.shape) != tuple(v.shape):
+                raise ValueError(
+                    f"{key}.{k} 形状不符：期望 {tuple(v.shape)}，"
+                    f"实际 {tuple(g.shape)}。"
+                    "多半是 rank 或专家数改了之后复用了旧 checkpoint。")
+        target.load_state_dict(got)
+        loaded += 1
+
+    for i, w in enumerate(wrappers):
+        for j, core in enumerate(w.macro_cores):
+            put(core, f"layer{i}.macro{j}")
+        for j, expert in enumerate(w.micro_pool):
+            put(expert, f"layer{i}.micro{j}")
+        put(w.router_macro, f"layer{i}.router_macro")
+        put(w.router_micro, f"layer{i}.router_micro")
+
+    missing = [k for k in sd
+               if k != "__meta__" and not k.startswith(tuple(f"layer{i}."
+                                                            for i in range(n_layers)))]
+    if missing:
+        raise ValueError(
+            f"检查点里有 {len(missing)} 个无法归属的键（层数对不上？）："
+            f"{missing[:5]}")
+    return loaded, meta
+
+
 __all__ = ["train", "evaluate", "build_model", "collect_params", "set_seed",
            "lr_lambda", "RouteStats", "save_checkpoint", "load_checkpoint",
-           "TrainContext", "causal_lm_loss", "count_supervised"]
+           "load_swarm_weights", "TrainContext", "causal_lm_loss",
+           "count_supervised"]

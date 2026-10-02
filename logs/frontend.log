@@ -1,7 +1,6 @@
 $ vite --port 5173 --strictPort
 
-  VITE v7.3.6  ready in 89 ms
+  VITE v7.3.6  ready in 87 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
-[ELIFECYCLE] Command failed.

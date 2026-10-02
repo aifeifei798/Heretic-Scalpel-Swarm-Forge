@@ -3,13 +3,15 @@ import { api, type Dataset, type DomainsPayload, type Health, type RunRow } from
 import { ArchDesigner } from "./components/ArchDesigner";
 import { DatasetPanel } from "./components/DatasetPanel";
 import { DEFAULT_FORM, TrainPanel, type TrainForm } from "./components/TrainPanel";
+import { Playground } from "./components/Playground";
 
-type Step = "data" | "arch" | "train";
+type Step = "data" | "arch" | "train" | "play";
 
 const STEPS: { id: Step; label: string }[] = [
   { id: "data", label: "① 数据集" },
   { id: "arch", label: "② 蜂群架构" },
   { id: "train", label: "③ 训练" },
+  { id: "play", label: "④ 试跑" },
 ];
 
 const PRESETS: { name: string; M: number; N: number; r: number; s: number }[] = [
@@ -256,6 +258,10 @@ export default function App() {
               refreshRuns();
             }}
           />
+        )}
+
+        {step === "play" && (
+          <Playground busy={busy} />
         )}
       </main>
 

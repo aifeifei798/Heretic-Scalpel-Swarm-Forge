@@ -73,6 +73,16 @@ class TelemetryTracker:
             self.micro_hits += torch.bincount(
                 k.reshape(-1).cpu(), minlength=self.num_micro).double()
 
+    @torch.no_grad()
+    def record_dense(self, macro_probs: torch.Tensor,
+                     micro_topk: torch.Tensor) -> None:
+        """全位置计入的快捷入口（生成时每个位置都是有效路由决策）。
+
+        与 :meth:`record` 的区别只是不需要构造 padding mask ——
+        hook 里逐调用现造一个 ``[B,T]`` 的全 True 张量纯属浪费。
+        """
+        self.record(macro_probs, micro_topk, mask=None)
+
     # -- 汇总 ---------------------------------------------------------
     def summary(self, macro_names: list[str] | None = None) -> dict[str, Any]:
         n = max(1, self.tokens)

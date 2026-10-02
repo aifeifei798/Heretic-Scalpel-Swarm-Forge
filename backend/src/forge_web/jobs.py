@@ -211,6 +211,25 @@ class TrainSpec(BaseModel):
         return argv
 
 
+class SwarmChatSpec(BaseModel):
+    """一次试跑请求。"""
+
+    checkpoint: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=8000)
+    system: str | None = Field(default=None, max_length=8000)
+    history: list[dict[str, str]] = Field(default_factory=list,
+                                          max_length=40)
+    max_new_tokens: int = Field(default=256, ge=1, le=1024)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+    seed: int = Field(default=0, ge=0)
+    top_k: int | None = Field(default=None, ge=1, le=512)
+    compare: bool = False
+    device: str = Field(default="cuda:0", max_length=40)
+    timeout_sec: int = Field(default=600, ge=30, le=3600,
+                             description="含底座加载时间。Gemma4 加载约 20~40s")
+
+
 def datagen_config(spec: DatasetSpec, out_path: str) -> DataGenConfig:
     return DataGenConfig(
         samples_per_domain=spec.per_domain,
@@ -230,5 +249,5 @@ def write_forge_config(cfg: ForgeConfig, path: Path) -> Path:
     return path
 
 
-__all__ = ["DatasetSpec", "ArchSpec", "TrainSpec",
+__all__ = ["DatasetSpec", "ArchSpec", "TrainSpec", "SwarmChatSpec",
            "datagen_config", "write_forge_config"]

@@ -140,4 +140,17 @@ export const api = {
   events: (runId: number) => new EventSource(`${BASE}/api/runs/${runId}/events`),
 
   logUrl: (runId: number) => `${BASE}/api/runs/${runId}/log`,
+
+  playground: () =>
+    req<{ checkpoints: { path: string; mb: number }[] }>("/api/playground"),
+  chat: (body: {
+    checkpoint: string; prompt: string; history?: { role: string; content: string }[];
+    max_new_tokens: number; temperature: number; compare: boolean; top_k?: number;
+  }) =>
+    req<{
+      text: string; base_text?: string; identical?: boolean;
+      tok_per_sec: number; meta?: Record<string, unknown>;
+      route?: { macro_dist: Record<string, number>; micro_dist: number[];
+                macro_dead: number; micro_dead: number };
+    }>("/api/chat", { method: "POST", body: JSON.stringify(body) }),
 };

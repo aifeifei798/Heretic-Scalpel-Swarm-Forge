@@ -1,20 +1,30 @@
 """发布包入口：``AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True)``。
 
-**本模块必须保持零相对导入。** 见 :mod:`forge_core.export.telemetry` 的说明。
+★同包模块**必须用相对导入**（``from .swarm_forge import ...``）
+--------------------------------------------------------------
+这是被真实加载路径逼出来的，不是风格问题。
+
+``trust_remote_code`` 的加载流程是：
+1. 把 ``modeling_scalpel.py`` 拷进
+   ``~/.cache/huggingface/modules/transformers_modules/<repo>/``；
+2. **静态扫描**该文件的 import，逐个 ``importlib.import_module()``
+   确认依赖存在（``dynamic_module_utils.check_imports``）；
+3. 扫描到的**相对导入**目标会被一并复制进同一目录
+   （``dynamic_module_utils`` 里对 ``module_needed`` 的 ``shutil.copyfile``）。
+
+所以：
+* 用绝对导入（``from swarm_forge import ...``）→ 第 2 步就炸，
+  报 ``ImportError: This modeling file requires the following packages
+  that were not found in your environment: swarm_forge``，
+  并荒谬地建议你去 ``pip install swarm_forge``。
+* 用相对导入 → 第 3 步自动把同级文件带过去，import 成立。
+
+我最初写的是绝对导入，并且还在自检里断言"不得含相对导入"——
+那条断言把错误认知固化了下来，等于主动给这个 bug 上了一道锁。
 
 本文件只做三件事：加载底座、把 swarm 权重装回、转发 ``forward``。
 路由实现**不复制到这里**——它来自随包发布的 ``swarm_forge.py``，
 那是 :mod:`forge_core.modeling.swarm` 的**逐字节副本**。
-
-为什么必须是副本而不是切片
---------------------------
-旧实现在导出时读自己的源码，用
-``open(__file__).read().split('# ------')[2]`` 之类按注释横线计数切段。
-这意味着一旦**任何一处**注释横线增删，切出来的就是错的代码块，
-而且不报错——它会切出一个语法合法但语义不同的片段。
-:func:`forge_core.export.bundle.build_bundle` 现在直接 ``shutil.copy``
-真实模块，并用 :mod:`forge_core.export.selftest` 验证副本与训练期
-前向输出**逐位一致**。
 """
 
 from __future__ import annotations
@@ -24,8 +34,8 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, PreTrainedModel
 
-from configuration_scalpel import ScalpelUniversalConfig
-from swarm_forge import (  # noqa: F401  (随包发布的逐字节副本)
+from .configuration_scalpel import ScalpelUniversalConfig
+from .swarm_forge import (  # noqa: F401  (随包发布的逐字节副本)
     ScalpelLoRA,
     SwarmWrapper,
     hidden_dim_of,
@@ -33,7 +43,7 @@ from swarm_forge import (  # noqa: F401  (随包发布的逐字节副本)
     strip_multimodal,
     wrap_layers,
 )
-from telemetry import TelemetryTracker
+from .telemetry import TelemetryTracker
 
 
 class ScalpelUniversalForCausalLM(PreTrainedModel):
@@ -93,6 +103,7 @@ class ScalpelUniversalForCausalLM(PreTrainedModel):
         inst = cls(config)
         inst.model = base
         inst.wrappers = wrappers
+        inst._attach_telemetry()
 
         if sw_path is None:
             sw_path = (f"{pretrained_model_name_or_path.rstrip('/')}"
@@ -100,6 +111,37 @@ class ScalpelUniversalForCausalLM(PreTrainedModel):
         inst.load_swarm_weights(sw_path)
         inst.eval()
         return inst
+
+    def _attach_telemetry(self) -> None:
+        """用 forward hook 采集路由分布。
+
+        ★不能靠在 :meth:`forward` 里读 ``kwargs``。
+        ``generate()`` 内部是以**位置参数**调用子模块的
+        （``self.model.generate`` -> decoder -> layer -> mlp），
+        根本不会经过本类重写的 ``forward``；就算经过，
+        ``kwargs`` 里也未必有 ``attention_mask``。
+
+        结果就是遥测静默地全是 0 —— 指标看起来"在工作"，
+        实则一个数都没采到。所以这里在**每个 SwarmWrapper** 上挂
+        forward hook：wrapper 一定会被调用，且它自己就缓存了
+        上一轮的 ``last_macro_probs`` / ``last_micro_topk``。
+
+        口径说明：``tokens`` 累加的是每次前向 ``x.shape[1]``，
+        即**路由决策的位置数**。带 KV cache 生成时每步只喂 1 个
+        新 token，所以这个数不等于 prompt+生成的总 token 数，
+        但它正是"router 做了多少次决策"，也正是判断专家是否被
+        使用的正确口径。
+        """
+        for w in self.wrappers:
+            def hook(mod, args, _out, _self=self):
+                probs = getattr(mod, "last_macro_probs", None)
+                topk = getattr(mod, "last_micro_topk", None)
+                if probs is None or topk is None:
+                    return
+                _self.telemetry.record_dense(probs.detach().float().cpu(),
+                                             topk.detach().cpu())
+
+            w.register_forward_hook(hook)
 
     # -- 权重 ---------------------------------------------------------
     def load_swarm_weights(self, path: str) -> None:
@@ -141,16 +183,10 @@ class ScalpelUniversalForCausalLM(PreTrainedModel):
 
     # -- 转发 ---------------------------------------------------------
     def forward(self, *args, **kwargs) -> Any:
-        out = self.model(*args, **kwargs)
-        attn = kwargs.get("attention_mask")
-        ids = kwargs.get("input_ids")
-        if attn is None and ids is not None:
-            attn = torch.ones_like(ids)
-        if attn is not None and self.wrappers:
-            mask = attn.bool() if attn.dtype == torch.bool else attn == 1
-            self.telemetry.record(self.wrappers[0].last_macro_probs,
-                                  self.wrappers[0].last_micro_topk, mask)
-        return out
+        # 遥测由 :meth:`_attach_telemetry` 挂的 forward hook 负责，
+        # 这里只做转发 —— generate() 是以位置参数一路调到
+        # layer.mlp 的，根本不会回到本类。
+        return self.model(*args, **kwargs)
 
     def generate(self, *args, **kwargs) -> Any:
         self.model.config.use_cache = True

@@ -1,13 +1,9 @@
 INFO:     Will watch for changes in these directories: ['/home/feifei/mnt/nvme_1t/develop/Heretic-Scalpel-Swarm-Forge']
 INFO:     Uvicorn running on http://127.0.0.1:8848 (Press CTRL+C to quit)
-INFO:     Started reloader process [72403] using WatchFiles
-INFO:     Started server process [72443]
+INFO:     Started reloader process [76012] using WatchFiles
+INFO:     Started server process [76052]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     127.0.0.1:37346 - "GET /api/health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:50578 - "GET /api/health HTTP/1.1" 200 OK
-INFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [72443]
-INFO:     Stopping reloader process [72403]
+INFO:     127.0.0.1:45008 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55804 - "GET /api/playground HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35368 - "POST /api/chat HTTP/1.1" 200 OK

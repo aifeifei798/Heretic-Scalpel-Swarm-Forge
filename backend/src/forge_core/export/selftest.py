@@ -21,6 +21,7 @@ import inspect
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import torch
@@ -81,7 +82,7 @@ def _randomize(wrappers: list[SwarmWrapper]) -> None:
 _BUNDLE_DIR: Path | None = None
 
 
-def _make_bundle(tmp: Path) -> Path:
+def _make_bundle(tmp: Path, dirname: str = "bundle") -> Path:
     """造一个真实发布包（走 build_bundle，而不是手工拼文件）。"""
     import torch as _t
 
@@ -104,17 +105,28 @@ def _make_bundle(tmp: Path) -> Path:
     ckpt = tmp / "ckpt.pt"
     _t.save(sd, ckpt)
 
-    out = tmp / "bundle"
+    out = tmp / dirname
     build_bundle(cfg, ckpt, out)
     return out
 
 
+_BUNDLE_PKG: str | None = None
+
+
 def _bundle() -> Path:
-    """整个模块共用一个发布包，避免反复搭。"""
-    global _BUNDLE_DIR
+    """整个模块共用一个发布包，避免反复搭。
+
+    目录名带随机后缀，这样它能直接当**包名**用（见
+    :func:`test_bundle_imports_resolve_like_transformers_does`），
+    不会和 PyPI 上任何叫 ``bundle`` 的东西撞名。
+    """
+    global _BUNDLE_DIR, _BUNDLE_PKG
     if _BUNDLE_DIR is None:
-        tmp = Path(tempfile.mkdtemp(prefix="forge-bundle-"))
-        _BUNDLE_DIR = _make_bundle(tmp)
+        pkg = f"forge_bundle_{uuid.uuid4().hex[:8]}"
+        root = Path(tempfile.mkdtemp(prefix="forge-bundle-"))
+        cfg_ckpt = _make_bundle(root, pkg)
+        _BUNDLE_DIR = cfg_ckpt
+        _BUNDLE_PKG = pkg
     return _BUNDLE_DIR
 
 
@@ -197,22 +209,80 @@ def test_forward_matches_copy() -> None:
             "ScalpelLoRA 构造签名与训练侧不一致"
 
 
-def test_no_relative_imports() -> None:
-    """发布包模块不得含 ``from .`` 相对导入。
+def test_bundle_imports_resolve_like_transformers_does() -> None:
+    """发布包必须能按 ``trust_remote_code`` 的**真实方式**被导入。
 
-    它们会被拷到模型仓库根目录由 ``sys.path`` 解析，
-    相对导入在那种加载方式下必然 ImportError。
+    ★这条测试是因为一次真实失败才写的。
+    ``transformers`` 加载 remote code 的流程是：
+
+    1. 把 ``modeling_scalpel.py`` 拷进动态模块目录；
+    2. ``check_imports`` **静态扫描**它的 import，逐个
+       ``importlib.import_module()`` 验证依赖存在；
+    3. 只有扫描到的**相对导入**目标才会被一并复制过去。
+
+    所以同包模块必须写 ``from .swarm_forge import ...``。
+    写成绝对导入（``from swarm_forge import ...``）会在第 2 步就炸：
+
+        ImportError: This modeling file requires the following packages
+        that were not found in your environment: swarm_forge
+        Run `pip install swarm_forge`
+
+    ——一个根本不存在于 PyPI 的包名。改回相对导入即可。
+
+    这里用"把发布目录当包导入"来复现第 3 步的语义：
+    目录里补一个 ``__init__.py``，把它的**父目录**放进 sys.path，
+    再 ``importlib.import_module("<bundle>.modeling_scalpel")``。
+    """
+    import importlib
+
+    bundle = _bundle()
+    (bundle / "__init__.py").write_text("", encoding="utf-8")
+
+    pkg = _BUNDLE_PKG
+    assert pkg and bundle.name == pkg, (bundle.name, pkg)
+    parent = str(bundle.parent)
+    sys.path.insert(0, parent)
+    try:
+        mod = importlib.import_module(f"{pkg}.modeling_scalpel")
+        assert hasattr(mod, "ScalpelUniversalForCausalLM")
+        # 相对导入链上的每个符号都应可用
+        assert mod.SwarmWrapper is not None
+        assert mod.ScalpelUniversalConfig is not None
+        assert mod.TelemetryTracker is not None
+    finally:
+        sys.path.remove(parent)
+        for name in list(sys.modules):
+            if name.startswith(pkg):
+                sys.modules.pop(name, None)
+        (bundle / "__init__.py").unlink(missing_ok=True)
+
+
+def test_sibling_imports_are_relative() -> None:
+    """入口模块对同包文件的导入必须是相对导入。
+
+    叶模块（``swarm_forge`` / ``telemetry`` / ``configuration_scalpel``）
+    则不允许引用任何同包模块——它们必须自洽，否则一旦被单独复制到
+    动态模块目录就会 ImportError。
     """
     bundle = _bundle()
-    for name in ("swarm_forge", "telemetry", "configuration_scalpel",
-                 "modeling_scalpel"):
-        text = (bundle / f"{name}.py").read_text(encoding="utf-8")
+
+    entry = (bundle / "modeling_scalpel.py").read_text(encoding="utf-8")
+    for sibling in ("swarm_forge", "configuration_scalpel", "telemetry"):
+        assert f"from .{sibling} import" in entry, (
+            f"modeling_scalpel.py 必须用 `from .{sibling} import ...`。"
+            "绝对导入会被 transformers 的 check_imports 拦下，"
+            "并报成「请 pip install 这个不存在的包」。")
+        # 防止同时存在绝对导入版本（相对导入不会覆盖它）
+        bad = f"\nfrom {sibling} import"
+        assert bad not in entry, f"modeling_scalpel.py 仍有绝对导入：{bad!r}"
+
+    for leaf in ("swarm_forge", "telemetry", "configuration_scalpel"):
+        text = (bundle / f"{leaf}.py").read_text(encoding="utf-8")
         for i, line in enumerate(text.splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith(("from .", "from ..")):
+            s = line.strip()
+            if s.startswith(("from .", "import .")):
                 raise AssertionError(
-                    f"{name}.py:{i} 含相对导入：{stripped!r}\n"
-                    "发布包模块必须只依赖 torch / transformers / 标准库。")
+                    f"{leaf}.py:{i} 是叶模块，不该引用同包模块：{s!r}")
 
 
 def test_bundle_roundtrip() -> None:
